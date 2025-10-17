@@ -1,0 +1,831 @@
+"use client";
+
+import { useState, useEffect, useCallback } from "react";
+import {
+  useAccount,
+  useSendTransaction,
+  useWaitForTransactionReceipt,
+  useWriteContract,
+  useWaitForTransactionReceipt as useWaitForApprovalReceipt,
+  useReadContract,
+} from "wagmi";
+import Image from "next/image";
+import { SignInWithBaseButton } from "./SignInWithBase";
+import { SpendPermissionSetup } from "./SpendPermissionSetup";
+import { SpendPermissionManager } from "./SpendPermissionManager";
+import { DCAManager } from "./DCAManager";
+
+interface TransactionData {
+  gas: string;
+  amountOut: string;
+  priceImpact: number;
+  minAmountOut: string;
+  createdAt: number;
+  tx: {
+    data: string;
+    to: string;
+    from: string;
+    value: string;
+  };
+  route: Array<{
+    action: string;
+    protocol: string;
+    tokenIn: string[];
+    tokenOut: string[];
+    chainId: number;
+  }>;
+}
+
+// Token addresses on Base
+const USDC_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const CBBTC_ADDRESS = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf";
+const LBTC_ADDRESS = "0xecac9c5f704e954931349da37f60e39f515c11c1";
+const WBTC_ADDRESS = "0x0555e30da8f98308edb960aa94c0db47230d2b9c";
+const ENSO_ROUTER_ADDRESS = "0xF75584eF6673aD213a685a1B58Cc0330B8eA22Cf";
+
+// ERC20 ABI for balanceOf
+const erc20Abi = [
+  {
+    name: "balanceOf",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+];
+
+interface DCAInterfaceProps {
+  activeTab: string;
+}
+
+export default function DCAInterface({ activeTab }: DCAInterfaceProps) {
+  const { address, isConnected } = useAccount();
+  const {
+    sendTransaction,
+    data: hash,
+    isPending,
+    error,
+  } = useSendTransaction();
+  const { isLoading: isConfirming, isSuccess: isConfirmed } =
+    useWaitForTransactionReceipt({ hash });
+
+  // Approval hooks
+  const {
+    writeContract: writeApproval,
+    data: approvalHash,
+    isPending: isApprovalPending,
+    error: approvalError,
+  } = useWriteContract();
+  const { isLoading: isApprovalConfirming, isSuccess: isApprovalConfirmed } =
+    useWaitForApprovalReceipt({ hash: approvalHash });
+
+  // Base Account authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userAddress, setUserAddress] = useState<string>("");
+  const [hasSpendPermission, setHasSpendPermission] = useState(false);
+  const [hasServerWallet, setHasServerWallet] = useState(false);
+
+  const [selectedAmount, setSelectedAmount] = useState(0);
+  const [customAmount, setCustomAmount] = useState("");
+  const [duration, setDuration] = useState(365);
+  const [allRates, setAllRates] = useState<
+    { token: string; rate: string; logo: string }[]
+  >([]);
+  const [transactionData, setTransactionData] =
+    useState<TransactionData | null>(null);
+  const [isApproved, setIsApproved] = useState(false);
+  const [needsApproval, setNeedsApproval] = useState(false);
+  const [usdcBalance, setUsdcBalance] = useState<number>(0);
+  const [tokenBalances, setTokenBalances] = useState({
+    usdc: 0,
+    cbbtc: 0,
+    lbtc: 0,
+    wbtc: 0,
+  });
+
+  const presetAmounts = [10, 100, 1000];
+
+  // Base Account authentication handlers
+  const handleSignIn = async (address: string) => {
+    console.log("User authenticated with address:", address);
+    setIsAuthenticated(true);
+    setUserAddress(address);
+  };
+
+  const handlePermissionGranted = () => {
+    setHasSpendPermission(true);
+  };
+
+  const createServerWallet = async () => {
+    try {
+      const response = await fetch("/api/wallet/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ userAddress }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to create server wallet: ${response.status}`);
+      }
+
+      const walletData = await response.json();
+      console.log("Server wallet created:", walletData);
+      setHasServerWallet(true);
+    } catch (error) {
+      console.error("Failed to create server wallet:", error);
+    }
+  };
+
+  const getAmount = useCallback(() => {
+    return selectedAmount || parseFloat(customAmount) || 0;
+  }, [selectedAmount, customAmount]);
+
+  const getTotalAmount = useCallback(() => {
+    return getAmount() * duration;
+  }, [getAmount, duration]);
+
+  // Read token balances for connected wallet
+  const { data: usdcBalanceRaw } = useReadContract({
+    address: USDC_ADDRESS as `0x${string}`,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+  });
+
+  const { data: cbbtcBalanceRaw } = useReadContract({
+    address: CBBTC_ADDRESS as `0x${string}`,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+  });
+
+  const { data: lbtcBalanceRaw } = useReadContract({
+    address: LBTC_ADDRESS as `0x${string}`,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+  });
+
+  const { data: wbtcBalanceRaw } = useReadContract({
+    address: WBTC_ADDRESS as `0x${string}`,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+  });
+
+  useEffect(() => {
+    // Calculate USDC balance
+    const usdcBal =
+      typeof usdcBalanceRaw === "bigint"
+        ? Number(usdcBalanceRaw) / 1_000_000
+        : 0;
+    setUsdcBalance(usdcBal);
+
+    // Calculate BTC token balances (all have 18 decimals except WBTC which has 8)
+    const cbbtcBal =
+      typeof cbbtcBalanceRaw === "bigint"
+        ? Number(cbbtcBalanceRaw) / 100_000_000
+        : 0;
+    const lbtcBal =
+      typeof lbtcBalanceRaw === "bigint"
+        ? Number(lbtcBalanceRaw) / 1_000_000_000_000_000_000
+        : 0;
+    const wbtcBal =
+      typeof wbtcBalanceRaw === "bigint"
+        ? Number(wbtcBalanceRaw) / 100_000_000
+        : 0; // WBTC has 8 decimals
+
+    setTokenBalances({
+      usdc: usdcBal,
+      cbbtc: cbbtcBal,
+      lbtc: lbtcBal,
+      wbtc: wbtcBal,
+    });
+  }, [usdcBalanceRaw, cbbtcBalanceRaw, lbtcBalanceRaw, wbtcBalanceRaw]);
+
+  const approveUSDC = async () => {
+    if (!address) return;
+
+    const amount = getAmount();
+    const amountInWei = BigInt(Math.floor(amount * 1000000)); // USDC has 6 decimals
+
+    try {
+      await writeApproval({
+        address: USDC_ADDRESS as `0x${string}`,
+        abi: [
+          {
+            name: "approve",
+            type: "function",
+            stateMutability: "nonpayable",
+            inputs: [
+              { name: "spender", type: "address" },
+              { name: "amount", type: "uint256" },
+            ],
+            outputs: [{ name: "", type: "bool" }],
+          },
+        ],
+        functionName: "approve",
+        args: [ENSO_ROUTER_ADDRESS as `0x${string}`, amountInWei],
+      });
+    } catch (error) {
+      console.error("Error approving USDC:", error);
+      alert(
+        `Error approving USDC: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
+    }
+  };
+
+  const checkBestRate = useCallback(async () => {
+    const amount = getAmount();
+    if (amount <= 0 || !address) return;
+
+    const amountInWei = Math.floor(amount * 1000000); // USDC has 6 decimals
+    const tokens = [
+      {
+        name: "CBBTC",
+        address: "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+        logo: "/assets/cbbtc-logo.png",
+      },
+      {
+        name: "LBTC",
+        address: "0xecac9c5f704e954931349da37f60e39f515c11c1",
+        logo: "/assets/lbtc-logo.jpeg",
+      },
+      {
+        name: "WBTC",
+        address: "0x0555e30da8f98308edb960aa94c0db47230d2b9c",
+        logo: "/assets/wbtc-logo.png",
+      },
+    ];
+
+    let bestTransactionData = null;
+    const rates: { token: string; rate: string; logo: string }[] = [];
+
+    for (const token of tokens) {
+      try {
+        const response = await fetch(
+          `https://api.enso.finance/api/v1/shortcuts/route?chainId=8453&slippage=500&fromAddress=${address}&amountIn=${amountInWei}&tokenIn=0x833589fcd6edb6e08f4c7c32d4f71b54bda02913&tokenOut=${token.address}`
+        );
+        const data = await response.json();
+
+        if (data.amountOut) {
+          rates.push({
+            token: token.name,
+            rate: data.amountOut,
+            logo: token.logo,
+          });
+
+          // Store the transaction data for the first (best) rate
+          if (!bestTransactionData) {
+            bestTransactionData = data;
+          }
+        }
+      } catch (error) {
+        console.error(`Error fetching rate for ${token.name}:`, error);
+      }
+    }
+
+    // Sort rates by amount (highest first)
+    rates.sort((a, b) => parseFloat(b.rate) - parseFloat(a.rate));
+    setAllRates(rates);
+
+    if (bestTransactionData) {
+      setTransactionData(bestTransactionData);
+    }
+  }, [address, getAmount]);
+
+  useEffect(() => {
+    if (getAmount() > 0 && isConnected && address) {
+      setAllRates([]); // Clear previous rates
+      checkBestRate();
+    } else {
+      setAllRates([]);
+    }
+  }, [getAmount, isConnected, address, checkBestRate]);
+
+  useEffect(() => {
+    if (isConfirmed) {
+      alert(`Transaction Confirmed!\nHash: ${hash}`);
+    }
+  }, [isConfirmed, hash]);
+
+  useEffect(() => {
+    if (isApprovalConfirmed) {
+      setIsApproved(true);
+      setNeedsApproval(false);
+      alert("USDC Approval Confirmed! You can now proceed with the swap.");
+    }
+  }, [isApprovalConfirmed]);
+
+  // Reset approval when amount changes
+  const currentAmount = getAmount();
+  useEffect(() => {
+    setIsApproved(false);
+    setNeedsApproval(true);
+  }, [currentAmount]);
+
+  const executeTrade = async () => {
+    if (!address || !transactionData) {
+      alert("Please connect your wallet and select an amount first.");
+      return;
+    }
+
+    if (!isApproved) {
+      alert("Please approve USDC spending first before executing the trade.");
+      return;
+    }
+
+    try {
+      if (!transactionData.tx) {
+        throw new Error("No transaction data available");
+      }
+
+      // Execute the transaction using wagmi
+      await sendTransaction({
+        to: transactionData.tx.to as `0x${string}`,
+        data: transactionData.tx.data as `0x${string}`,
+        value: BigInt(transactionData.tx.value || "0"),
+      });
+
+      // Transaction is now pending, the UI will update based on the transaction state
+      alert(
+        `Transaction executed successfully! Check your wallet for confirmation.`
+      );
+    } catch (error) {
+      console.error("Error executing trade:", error);
+      alert(
+        `Error executing trade: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
+    }
+  };
+
+  // Show authentication flow for DCA tab
+  if (activeTab === "dca") {
+    return (
+      <main className="max-w-4xl mx-auto px-6 py-8">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            Base DCA Demo
+          </h1>
+          <p className="text-lg text-gray-600">Base DCA Demo page</p>
+        </div>
+
+        {/* Sign In Section */}
+        {!isAuthenticated ? (
+          <div className="bg-white rounded-2xl p-8 shadow-sm mb-8 text-center">
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">
+              Welcome to Sub Account Demo
+            </h2>
+            <p className="text-lg text-gray-600 mb-8">
+              Sign in with your Base Account to start testing Sub Account
+              functionality.
+            </p>
+
+            {/* Sign In with Base Button */}
+            <SignInWithBaseButton onSignIn={handleSignIn} colorScheme="dark" />
+
+            <div className="mt-6 p-4 bg-blue-50 rounded-lg">
+              <p className="text-sm text-blue-700">
+                <strong>Base Account:</strong> Sign in with your Base Account to
+                access Sub Account features. This uses the official Base Account
+                SDK with signature verification.
+              </p>
+            </div>
+          </div>
+        ) : !hasServerWallet ? (
+          <div className="text-center">
+            <div className="mb-8">
+              <h2 className="text-2xl font-bold text-gray-900 mb-4">
+                Create Server Wallet
+              </h2>
+              <p className="text-gray-600 mb-8">
+                Create a server wallet to enable automated DCA transactions.
+              </p>
+            </div>
+            <button
+              onClick={createServerWallet}
+              className="bg-base-blue text-white px-8 py-4 rounded-lg font-medium hover:bg-blue-700 transition-colors"
+            >
+              Create Server Wallet
+            </button>
+          </div>
+        ) : !hasSpendPermission ? (
+          <div className="text-center">
+            <div className="mb-8">
+              <h2 className="text-2xl font-bold text-gray-900 mb-4">
+                Almost Ready!
+              </h2>
+              <p className="text-gray-600 mb-8">
+                Set up your spending permissions to start using the DCA
+                features.
+              </p>
+            </div>
+            <SpendPermissionSetup
+              userAddress={userAddress}
+              onPermissionGranted={handlePermissionGranted}
+            />
+          </div>
+        ) : (
+          <div className="space-y-8">
+            {/* Welcome Section */}
+            <div className="bg-white rounded-2xl p-8 shadow-sm">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold text-gray-900 mb-2">
+                    Welcome back!
+                  </h2>
+                  <p className="text-gray-600">
+                    Signed in as: {userAddress.slice(0, 6)}...
+                    {userAddress.slice(-4)}
+                  </p>
+                  <p className="text-sm text-green-600 mt-1">
+                    ✅ Spend permissions configured
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setIsAuthenticated(false);
+                    setUserAddress("");
+                    setHasSpendPermission(false);
+                    setHasServerWallet(false);
+                  }}
+                  className="bg-gray-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-gray-700 transition-colors"
+                >
+                  Sign Out
+                </button>
+              </div>
+            </div>
+
+            {/* DCA Manager */}
+            <div className="mb-8">
+              <DCAManager userAddress={userAddress} />
+            </div>
+
+            {/* Spend Permission Manager */}
+            <div className="mb-8">
+              <SpendPermissionManager
+                isAuthenticated={isAuthenticated}
+                userAddress={userAddress}
+              />
+            </div>
+          </div>
+        )}
+      </main>
+    );
+  }
+
+  return (
+    <main className="max-w-6xl mx-auto px-6 py-8">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Left Panel - Configuration */}
+        <div className="bg-white rounded-2xl p-8 shadow-sm">
+          <h2 className="text-2xl font-bold text-gray-900 mb-6">
+            {activeTab === "dca"
+              ? "Dollar Cost Averaging"
+              : "One-Time Bitcoin Purchase"}
+          </h2>
+
+          {/* BTC Selection Header */}
+          <div className="mb-6 p-4 bg-orange-50 rounded-lg border border-orange-200">
+            <div className="flex items-center justify-center space-x-2">
+              <span className="text-2xl">🟠</span>
+              <span className="text-lg font-medium text-orange-700">
+                {activeTab === "dca"
+                  ? "Bitcoin DCA Strategy"
+                  : "Optimal Bitcoin Purchase"}
+              </span>
+            </div>
+          </div>
+
+          {/* Duration - Only show for DCA */}
+          {activeTab === "dca" && (
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                For{" "}
+                <input
+                  type="number"
+                  value={duration}
+                  onChange={(e) => setDuration(parseInt(e.target.value) || 365)}
+                  className="inline-block w-20 mx-2 px-2 py-1 border border-gray-300 rounded-md text-center"
+                />{" "}
+                days,
+              </label>
+            </div>
+          )}
+
+          {/* Amount Selection */}
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-3">
+              {activeTab === "dca"
+                ? "Every day I want to buy"
+                : "Amount to buy now"}
+            </label>
+            <div className="grid grid-cols-3 gap-3 mb-4">
+              {presetAmounts.map((amount) => (
+                <button
+                  key={amount}
+                  onClick={() => {
+                    setSelectedAmount(amount);
+                    setCustomAmount("");
+                  }}
+                  className={`py-3 px-4 rounded-lg border font-medium transition-colors ${
+                    selectedAmount === amount
+                      ? "border-blue-600 bg-blue-50 text-blue-700"
+                      : "border-gray-300 text-gray-700 hover:border-gray-400"
+                  }`}
+                >
+                  ${amount}
+                </button>
+              ))}
+            </div>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+                $
+              </span>
+              <input
+                type="text"
+                placeholder="Enter custom amount"
+                value={customAmount}
+                onChange={(e) => {
+                  setCustomAmount(e.target.value);
+                  setSelectedAmount(0);
+                }}
+                className="w-full pl-8 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+              />
+            </div>
+            <p className="text-sm text-gray-500 mt-2">
+              You can buy up to $
+              {usdcBalance.toLocaleString(undefined, {
+                maximumFractionDigits: 2,
+              })}
+            </p>
+          </div>
+
+          {/* Total Amount - Different display for each tab */}
+          <div className="mb-6 p-4 bg-gray-50 rounded-lg">
+            <div className="flex justify-between items-center">
+              <span className="text-lg font-medium text-gray-700">
+                {activeTab === "dca" ? "Total Amount" : "Purchase Amount"}
+              </span>
+              <span className="text-2xl font-bold text-blue-600">
+                $
+                {activeTab === "dca"
+                  ? getTotalAmount().toLocaleString()
+                  : getAmount().toLocaleString()}
+              </span>
+            </div>
+          </div>
+
+          {/* Approval Status */}
+          {needsApproval && !isApproved && (
+            <div className="mb-6 p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+              <div className="text-sm font-medium text-yellow-700 mb-2">
+                USDC Approval Required
+              </div>
+              <div className="text-sm text-yellow-600 mb-3">
+                You need to approve USDC spending before executing the swap.
+              </div>
+              {approvalHash && (
+                <div className="text-xs text-yellow-600 mb-2">
+                  Approval Hash: {approvalHash}
+                </div>
+              )}
+              {isApprovalConfirming && (
+                <div className="text-sm text-yellow-600">
+                  ⏳ Confirming approval...
+                </div>
+              )}
+              {approvalError && (
+                <div className="text-sm text-red-600">
+                  ❌ Approval Error:{" "}
+                  {(approvalError as Error)?.message || "Approval failed"}
+                </div>
+              )}
+            </div>
+          )}
+
+          {isApproved && (
+            <div className="mb-6 p-4 bg-green-50 rounded-lg border border-green-200">
+              <div className="text-sm font-medium text-green-700 mb-2">
+                ✅ USDC Approved
+              </div>
+              <div className="text-sm text-green-600">
+                You can now proceed with the swap.
+              </div>
+            </div>
+          )}
+
+          {/* Transaction Status */}
+          {hash && (
+            <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+              <div className="text-sm font-medium text-blue-700 mb-2">
+                Swap Transaction Status
+              </div>
+              <div className="text-xs text-blue-600 mb-2">Hash: {hash}</div>
+              {isConfirming && (
+                <div className="text-sm text-blue-600">
+                  ⏳ Confirming transaction...
+                </div>
+              )}
+              {isConfirmed && (
+                <div className="text-sm text-green-600">
+                  ✅ Transaction confirmed!
+                </div>
+              )}
+              {error && (
+                <div className="text-sm text-red-600">
+                  ❌ Error: {(error as Error)?.message || "Transaction failed"}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Action Buttons */}
+          <div className="space-y-3">
+            {/* Approve Button */}
+            {needsApproval && !isApproved && (
+              <button
+                onClick={approveUSDC}
+                disabled={
+                  getAmount() <= 0 ||
+                  isApprovalPending ||
+                  isApprovalConfirming ||
+                  !transactionData
+                }
+                className={`w-full py-4 rounded-lg font-medium text-lg transition-colors ${
+                  getAmount() > 0 &&
+                  transactionData &&
+                  !isApprovalPending &&
+                  !isApprovalConfirming
+                    ? "bg-blue-600 text-white hover:bg-blue-700"
+                    : "bg-gray-300 text-gray-500 cursor-not-allowed"
+                }`}
+              >
+                {isApprovalPending && "⏳ Confirming..."}
+                {isApprovalConfirming && "⏳ Processing..."}
+                {!isApprovalPending && !isApprovalConfirming && "Approve USDC"}
+              </button>
+            )}
+
+            {/* Swap Button */}
+            <button
+              onClick={executeTrade}
+              disabled={
+                getAmount() <= 0 ||
+                isPending ||
+                isConfirming ||
+                !transactionData ||
+                !isApproved
+              }
+              className={`w-full py-4 rounded-lg font-medium text-lg transition-colors ${
+                getAmount() > 0 &&
+                transactionData &&
+                isApproved &&
+                !isPending &&
+                !isConfirming
+                  ? "bg-gray-600 text-white hover:bg-gray-700"
+                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
+              }`}
+            >
+              {isPending && "⏳ Confirming..."}
+              {isConfirming && "⏳ Processing..."}
+              {isConfirmed && "✅ Completed"}
+              {!isPending &&
+                !isConfirming &&
+                !isConfirmed &&
+                (activeTab === "dca"
+                  ? "Setup DCA Strategy"
+                  : "Buy Bitcoin Now")}
+            </button>
+          </div>
+        </div>
+
+        {/* Right Panel - Investment Summary */}
+        <div className="bg-white rounded-2xl p-8 shadow-sm">
+          <div className="text-center mb-8">
+            <div className="w-24 h-24 bg-gradient-to-br from-orange-400 to-orange-600 rounded-full mx-auto mb-4 flex items-center justify-center">
+              <span className="text-3xl text-white">₿</span>
+            </div>
+            <h3 className="text-lg font-medium text-gray-600 mb-2">
+              {activeTab === "dca" ? "Daily Investment" : "Purchase Amount"}
+            </h3>
+            <div className="text-4xl font-bold text-gray-900 mb-1">
+              ${getAmount()}
+            </div>
+            <div className="text-gray-500">USDC</div>
+          </div>
+
+          <div className="space-y-4">
+            {activeTab === "dca" && (
+              <div className="flex justify-between items-center py-3 border-b border-gray-100">
+                <span className="text-gray-600">Duration:</span>
+                <span className="font-medium">{duration} days</span>
+              </div>
+            )}
+            <div className="flex justify-between items-center py-3 border-b border-gray-100">
+              <span className="text-gray-600">
+                {activeTab === "dca" ? "Total Investment:" : "Purchase Amount:"}
+              </span>
+              <span className="font-medium text-blue-600">
+                $
+                {activeTab === "dca"
+                  ? getTotalAmount().toLocaleString()
+                  : getAmount().toLocaleString()}
+              </span>
+            </div>
+            {allRates.length > 0 && (
+              <div className="space-y-3">
+                <div className="text-sm font-medium text-gray-700 mb-3">
+                  Available Rates:
+                </div>
+                {allRates.map((rate, index) => (
+                  <div
+                    key={rate.token}
+                    className={`p-4 rounded-lg border ${
+                      index === 0
+                        ? "bg-green-50 border-green-200"
+                        : "bg-gray-50 border-gray-200"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-3">
+                        <div className="w-8 h-8 relative">
+                          <Image
+                            src={rate.logo}
+                            alt={`${rate.token} logo`}
+                            fill
+                            className="rounded-full object-cover"
+                          />
+                        </div>
+                        <div>
+                          <div
+                            className={`font-medium ${
+                              index === 0 ? "text-green-700" : "text-gray-700"
+                            }`}
+                          >
+                            {rate.token}
+                            {index === 0 && (
+                              <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">
+                                BEST
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-sm text-gray-500">
+                            {parseFloat(rate.rate).toFixed(8)} tokens
+                          </div>
+                        </div>
+                      </div>
+                      <div
+                        className={`text-right ${
+                          index === 0 ? "text-green-600" : "text-gray-600"
+                        }`}
+                      >
+                        <div className="text-sm font-medium">
+                          $
+                          {(parseFloat(rate.rate) * 0.00000001 * 95000).toFixed(
+                            2
+                          )}
+                        </div>
+                        <div className="text-xs">Est. Value</div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <div className="text-xs text-blue-600 mt-2 text-center">
+                  ✓ Optimized via Enso Protocol
+                </div>
+              </div>
+            )}
+
+            {/* Loading state when checking rates */}
+            {getAmount() > 0 && isConnected && allRates.length === 0 && (
+              <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
+                <div className="flex items-center space-x-2">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+                  <div className="text-sm text-blue-600">
+                    Finding best rates...
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Wallet not connected message */}
+            {getAmount() > 0 && !isConnected && (
+              <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                <div className="text-sm text-yellow-600">
+                  Please connect your wallet to see rates
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
